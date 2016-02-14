@@ -1,0 +1,6 @@
+[submodule "deps/crc"]
+	path = deps/crc
+	url = git@github.com:MichaelXavier/crc.git
+[submodule "deps/lzf-bytestring"]
+	path = deps/lzf-bytestring
+	url = git@github.com:MichaelXavier/lzf-bytestring.git

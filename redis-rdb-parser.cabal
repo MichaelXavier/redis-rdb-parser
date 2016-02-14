@@ -1,0 +1,64 @@
+name:                redis-rdb-parser
+version:             0.0.0
+synopsis:            Parser for Redis' RDB file format
+description:         Please see README.md
+homepage:            http://github.com/MichaelXavier/redis-rdb-parser
+license:             MIT
+license-file:        LICENSE
+author:              Michael Xavier
+maintainer:          michael@michaelxavier.net
+copyright:           2015 Michael Xavier
+category:            Web
+build-type:          Simple
+-- extra-source-files:
+cabal-version:       >=1.10
+
+flag lib-Werror
+  default: False
+  manual: True
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Database.Redis.RDB
+  build-depends:       base >= 4.5 && < 5
+                     , attoparsec
+                     , bytestring
+                     , time
+                     , crc
+                     , lzf-bytestring
+                     , containers
+                     -- todo: drop this and put into a conduit package
+                     , conduit
+                     , conduit-extra
+                     , exceptions
+                     , resourcet
+                     , transformers
+  default-language:    Haskell2010
+
+  if flag(lib-Werror)
+    ghc-options: -Werror
+
+  ghc-options: -Wall
+
+
+test-suite test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Main.hs
+  build-depends:       base
+                     , redis-rdb-parser
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  default-language:    Haskell2010
+
+  if flag(lib-Werror)
+    ghc-options: -Werror
+
+  ghc-options: -Wall
+
+
+source-repository head
+  type:     git
+  location: https://github.com/MichaelXavier/redis-rdb-parser
+
+
+--TODO: benchmarks
