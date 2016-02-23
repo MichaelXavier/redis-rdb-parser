@@ -22,6 +22,7 @@ library
   exposed-modules:     Database.Redis.RDB
   build-depends:       base >= 4.5 && < 5
                      , attoparsec
+                     , attoparsec-binary
                      , bytestring
                      , time
                      , crc
