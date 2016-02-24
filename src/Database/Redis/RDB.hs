@@ -12,6 +12,8 @@ module Database.Redis.RDB
     , RedisList(..)
     , RedisSet(..)
     , RedisZiplist(..)
+    , RedisHMZiplist(..)
+    , RedisZSZiplist(..)
     , RedisZLEntry(..)
     , EOF(..)
     , RCRC64(..)
@@ -164,6 +166,8 @@ data RedisValue = RVString !RedisString
                 | RVSet !RedisSet
                 | RVIntSet !RedisIntSet
                 | RVZiplist !RedisZiplist
+                | RVHashmapInZiplist !RedisHMZiplist
+                | RVZSetInZiplistEnc !RedisZSZiplist
                 deriving (Show, Eq)
 
 
@@ -182,6 +186,16 @@ data RedisZiplist = RedisZiplist {
     , zlTail    :: !Word32
     , zlLen     :: !Word16
     , zlEntries :: ![RedisZLEntry]
+    } deriving (Show, Eq)
+
+
+newtype RedisHMZiplist = RedisHMZiplist {
+      redisHMZiplist :: RedisZiplist
+    } deriving (Show, Eq)
+
+
+newtype RedisZSZiplist = RedisZSZiplist {
+      redisZSZiplist :: RedisZiplist
     } deriving (Show, Eq)
 
 
@@ -274,9 +288,9 @@ parseVal ZSetEnc             = error "TODO: ZSetEnc"
 parseVal HashEnc             = error "TODO: HashEnc"
 parseVal ZipmapEnc           = error "TODO: ZipmapEnc"
 parseVal ZiplistEnc          = RVZiplist <$> redisZiplistP
-parseVal IntsetEnc           = error "TODO: IntsetEnc"
-parseVal ZSetInZiplistEnc    = error "TODO: ZSetInZiplistEnc"
-parseVal HashmapInZiplistEnc = error "TODO: HashmapInZiplistEnc"
+parseVal IntsetEnc           = RVIntSet <$> redisIntSetP
+parseVal ZSetInZiplistEnc    = RVZSetInZiplistEnc <$> redisZSetInZiplistP
+parseVal HashmapInZiplistEnc = RVHashmapInZiplist <$> redisHashmapInZiplistP
 
 
 -------------------------------------------------------------------------------
@@ -292,15 +306,42 @@ redisSetP = RedisSet . S.fromList . redisList <$> redisListP
 
 
 -------------------------------------------------------------------------------
+redisIntSetP :: Parser RedisIntSet
+redisIntSetP = either fail return . parseOnly parseEnvelope =<< redisStringOnlyP
+  where
+    parseEnvelope = do
+      enc <- anyWord32le
+      case traceShow ("enc" :: String, enc) enc of
+        2 -> RedisIntSet16 <$> go anyWord16le
+        4 -> RedisIntSet32 <$> go anyWord32le
+        8 -> RedisIntSet64 <$> go anyWord64le
+        x -> fail ("Invalid intset encoding " <> show x)
+    go parser = do
+      len <- anyWord32le
+      traceShow ("len" :: String, len) (S.fromList <$> replicateM (fromIntegral len) parser)
+
+
+-------------------------------------------------------------------------------
+-- I think technically we aren't supposed to take integer keys?
+redisHashmapInZiplistP :: Parser RedisHMZiplist
+redisHashmapInZiplistP = RedisHMZiplist <$> redisZiplistP
+
+
+-------------------------------------------------------------------------------
+redisZSetInZiplistP :: Parser RedisZSZiplist
+redisZSetInZiplistP = RedisZSZiplist <$> redisZiplistP
+
+
+-------------------------------------------------------------------------------
 redisZiplistP :: Parser RedisZiplist
 redisZiplistP = either fail return . parseOnly parseEnvelope =<< redisStringOnlyP
   where
     parseEnvelope = do
       zlb <- anyWord32le
-      zlt <- anyWord32le
-      zll <- anyWord16le
-      entries <- replicateM (fromIntegral zll) redisZLEntryP
-      _zlend <- word8 255
+      zlt <- traceShow ("zlb" :: String, zlb) anyWord32le
+      zll <- traceShow ("zlt" :: String, zlt) anyWord16le
+      entries <- traceShow ("zll" :: String, zll) $ replicateM (fromIntegral zll) redisZLEntryP
+      _zlend <- traceShow ("entries" :: String, entries) $ word8 255
       return (RedisZiplist zlb zlt zll entries)
 
 
@@ -312,7 +353,7 @@ redisZLEntryP = do
                then return (Left lenFirst)
                else Right <$> anyWord32be
   firstByte <- testBit8 <$> peekWord8'
-  str <- case firstByte of
+  str <- case traceShow firstByte firstByte of
     (O,O,_,_,_,_,_,_) -> fmap RString . A.take . fromIntegral =<< anyWord8
     (O,I,_,_,_,_,_,_) -> do -- take 16 bits, ignore these first two, that's strlen
       len14 <- (`clearBit` 14) <$> anyWord16be -- only need to set this one I to off
@@ -320,19 +361,24 @@ redisZLEntryP = do
     (I,O,_,_,_,_,_,_) -> do
       _ <- anyWord8 -- trash this byte we're focusing on, take next 4
       fmap RString . A.take . fromIntegral =<< anyWord32be
-    (I,I,O,O,_,_,_,_) -> -- next 2 bytes are 16 bit signed
-      fmap RString . A.take . fromIntegral . w16i =<< anyWord16be
-    (I,I,O,I,_,_,_,_) -> -- next 4 bytes are 32 bit signed
-      fmap RString . A.take . fromIntegral . w32i =<< anyWord32be
-    (I,I,I,O,_,_,_,_) -> -- next 8 bytes are 64 bit signed
-      fmap RString . A.take . fromIntegral . w64i =<< anyWord64be
-    (I,I,I,I,O,O,O,O) -> -- next 3 bytes as 24 bit signed integer
-      fmap RString . A.take . fromIntegral . i24i =<< anyInt24BE
-    (I,I,I,I,I,I,I,O) -> -- next byte as 8 bit signed
-      fmap RString . A.take . fromIntegral . w8i =<< anyWord8
+    (I,I,O,O,_,_,_,_) -> do -- next 2 bytes are 16 bit signed
+      _ <- anyWord8
+      RInt . fromIntegral . w16i <$> anyWord16be
+    (I,I,O,I,_,_,_,_) -> do -- next 4 bytes are 32 bit signed
+      _ <- anyWord8
+      RInt . fromIntegral . w32i <$> anyWord32be
+    (I,I,I,O,_,_,_,_) -> do -- next 8 bytes are 64 bit signed
+      _ <- anyWord8
+      RInt . fromIntegral . w64i <$> anyWord64be
+    (I,I,I,I,O,O,O,O) -> do -- next 3 bytes as 24 bit signed integer
+      _ <- anyWord8
+      RInt . fromIntegral . i24i <$> anyInt24BE
+    (I,I,I,I,I,I,I,O) -> do -- next byte as 8 bit signed
+      _ <- anyWord8
+      RInt . fromIntegral . w8i . (\x -> traceShow ("w8i" :: String, x) x) <$> anyWord8
     (I,I,I,I,_,_,_,_) -> -- remaining is unsigned int 4 from 0000 to 1101 - 1
       -- take off first 4 bits with 0xf mask
-      fmap RString . A.take . fromIntegral . pred . (0xf .&.) =<< anyWord8
+      RInt . fromIntegral . pred . (0xf .&.) <$> anyWord8
   return (RedisZLEntry prevLen str)
 
 
@@ -373,7 +419,7 @@ w64i = fromIntegral
 
 -------------------------------------------------------------------------------
 -- | Cute way of modeling readable masks
-data B = O | I
+data B = O | I deriving (Show)
 
 
 testBit8 :: Word8 -> (B,B,B,B,B,B,B,B)
