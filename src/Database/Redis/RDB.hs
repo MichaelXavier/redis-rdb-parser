@@ -12,6 +12,7 @@ module Database.Redis.RDB
     , RedisList(..)
     , RedisSet(..)
     , RedisZiplist(..)
+    , RedisZipmap(..)
     , RedisHMZiplist(..)
     , RedisZSZiplist(..)
     , RedisZLEntry(..)
@@ -37,22 +38,25 @@ import           Control.Applicative
 import           Control.Monad
 import           Control.Monad.Catch
 import           Control.Monad.IO.Class
+import           Control.Monad.Trans.Class
 import           Control.Monad.Trans.Resource
+import           Control.Monad.Trans.State.Strict
 import           Data.Attoparsec.Binary
-import           Data.Attoparsec.ByteString   as A
+import           Data.Attoparsec.ByteString       as A
 import           Data.Bits
-import           Data.ByteString              (ByteString)
+import           Data.ByteString                  (ByteString)
 import           Data.Int
+import           Data.Ix
 -- import qualified Data.ByteString              as BS
-import qualified Data.ByteString.Char8        as BS8
+import qualified Data.ByteString.Char8            as BS8
 import           Data.Conduit
 import           Data.Conduit.Attoparsec
 import           Data.Conduit.Binary
-import qualified Data.Conduit.List            as CL
+import qualified Data.Conduit.List                as CL
 import           Data.Monoid
 import           Data.Ratio
-import           Data.Set                     (Set)
-import qualified Data.Set                     as S
+import           Data.Set                         (Set)
+import qualified Data.Set                         as S
 import           Data.Time.Clock.POSIX
 import           Data.Word
 import           Debug.Trace
@@ -166,6 +170,7 @@ data RedisValue = RVString !RedisString
                 | RVSet !RedisSet
                 | RVIntSet !RedisIntSet
                 | RVZiplist !RedisZiplist
+                | RVZipmap !RedisZipmap
                 | RVHashmapInZiplist !RedisHMZiplist
                 | RVZSetInZiplistEnc !RedisZSZiplist
                 deriving (Show, Eq)
@@ -186,6 +191,12 @@ data RedisZiplist = RedisZiplist {
     , zlTail    :: !Word32
     , zlLen     :: !Word16
     , zlEntries :: ![RedisZLEntry]
+    } deriving (Show, Eq)
+
+
+data RedisZipmap = RedisZipmap {
+      zmLen   :: !(Maybe Word8)
+    , zmItems :: ![ByteString]
     } deriving (Show, Eq)
 
 
@@ -284,9 +295,9 @@ parseVal :: RedisValueType -> Parser RedisValue
 parseVal StringEnc           = RVString <$> redisStringP
 parseVal ListEnc             = RVList <$> redisListP
 parseVal SetEnc              = RVSet <$> redisSetP
-parseVal ZSetEnc             = error "TODO: ZSetEnc"
-parseVal HashEnc             = error "TODO: HashEnc"
-parseVal ZipmapEnc           = error "TODO: ZipmapEnc"
+parseVal ZSetEnc             = error "TODO: ZSetEnc" --FIXME: docs just TODO this...
+parseVal HashEnc             = RVHash <$> rvHash
+parseVal ZipmapEnc           = RVZipmap <$> redisZipmapP
 parseVal ZiplistEnc          = RVZiplist <$> redisZiplistP
 parseVal IntsetEnc           = RVIntSet <$> redisIntSetP
 parseVal ZSetInZiplistEnc    = RVZSetInZiplistEnc <$> redisZSetInZiplistP
@@ -343,6 +354,38 @@ redisZiplistP = either fail return . parseOnly parseEnvelope =<< redisStringOnly
       entries <- traceShow ("zll" :: String, zll) $ replicateM (fromIntegral zll) redisZLEntryP
       _zlend <- traceShow ("entries" :: String, entries) $ word8 255
       return (RedisZiplist zlb zlt zll entries)
+
+
+-------------------------------------------------------------------------------
+--TODO: find an old database that still uses zipmaps
+redisZipmapP :: Parser RedisZipmap
+redisZipmapP = do
+  len <- anyWord8
+  let zml = if len >= 254
+               then Nothing
+               else Just len
+  let expectFree = False -- first one
+  items <- evalStateT (many itemP) expectFree
+  _ <- word8 255
+  return (RedisZipmap zml items)
+  where
+    itemP = do
+      len <- lift itemLen
+      expectFree <- get
+      free <- if expectFree
+                 then lift freeP
+                 else put True >> return 0
+      lift $ do
+        s <- A.take len
+        _ <- A.take (fromIntegral free)
+        return s
+    freeP = anyWord8
+    itemLen = do
+      firstByte <- anyWord8
+      case firstByte of
+        253 -> fromIntegral <$> anyWord32be
+        n | inRange (0, 252) n -> return (fromIntegral n)
+        _ -> fail "item length must be between 0 and 253"
 
 
 -------------------------------------------------------------------------------
